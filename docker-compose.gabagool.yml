@@ -1,0 +1,104 @@
+version: '3.8'
+
+services:
+  gabagool-mirror:
+    build:
+      context: .
+      dockerfile: Dockerfile.gabagool
+    container_name: gabagool-mirror
+    restart: unless-stopped
+    ports:
+      - "8080:8080"   # Health/status
+      - "9090:9090"   # Metrics
+    environment:
+      - EXECUTION_MODE=SHADOW
+      - DATABASE_URL=postgresql+asyncpg://gabagool:gabagool@postgres:5432/gabagool_mirror
+      - GABAGOOL_WALLET=0x6031b6eed1c97e853c6e0f03ad3ce3529351f96d
+      - DEFAULT_LATENCY_MS=2000
+      - SLIPPAGE_BPS_BUFFER=50
+      - MIN_MAPPING_CONFIDENCE=0.7
+      - MAX_QTY_SCALE=0.5
+      - KALSHI_LIVE_ENABLED=false
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - gabagool-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: gabagool-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gabagool
+      POSTGRES_PASSWORD: gabagool
+      POSTGRES_DB: gabagool_mirror
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - gabagool-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gabagool -d gabagool_mirror"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  adminer:
+    image: adminer:latest
+    container_name: gabagool-adminer
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    networks:
+      - gabagool-net
+    depends_on:
+      - postgres
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: gabagool-prometheus
+    restart: unless-stopped
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - gabagool-net
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: gabagool-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=gabagool
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      - gabagool-net
+    depends_on:
+      - prometheus
+
+volumes:
+  postgres-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  gabagool-net:
+    driver: bridge
+

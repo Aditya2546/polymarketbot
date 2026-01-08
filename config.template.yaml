@@ -1,0 +1,444 @@
+# Kalshi 15-Minute BTC Direction Assistant Configuration
+
+# ==============================================================================
+# API CREDENTIALS
+# ==============================================================================
+# Kalshi API uses RSA key-based authentication
+# Get your API key ID and generate RSA key pair at: https://kalshi.com/account/api
+kalshi:
+  api_key_id: "YOUR_KALSHI_API_KEY_ID"
+  private_key_path: "path/to/your/private_key.pem"  # Path to RSA private key file
+  base_url: "https://api.elections.kalshi.com/trade-api/v2"
+  ws_url: "wss://api.elections.kalshi.com/trade-api/ws/v2"
+
+polymarket:
+  # Optional - only needed if using Polymarket overlay
+  enabled: false
+  clob_api_url: "https://clob.polymarket.com"
+  gamma_api_url: "https://gamma-api.polymarket.com"
+
+# ==============================================================================
+# DATA SOURCES
+# ==============================================================================
+data_sources:
+  # Settlement-grade BTC index configuration
+  brti:
+    # Preferred: direct CF Benchmarks feed (requires license)
+    use_cf_benchmarks: false  # Set to true if you have access
+    cf_api_key: ""
+    
+    # Fallback: high-quality exchange composite
+    fallback_exchanges:
+      - coinbase
+      - bitstamp
+      - kraken
+    
+    # Update frequency (seconds)
+    update_interval: 1.0
+    
+    # Ring buffer size (seconds) - must be >= 180 for avg60 computation
+    buffer_size: 300
+
+  # Kalshi market discovery
+  kalshi_markets:
+    # Auto-discover active 15m BTC markets
+    auto_discover: true
+    
+    # Or specify exact market ticker (e.g., "BTCUP-24JAN07-15M-1200")
+    manual_market_id: null
+    
+    # Refresh interval for market discovery (seconds)
+    discovery_interval: 60
+
+# ==============================================================================
+# SETTLEMENT ENGINE
+# ==============================================================================
+settlement:
+  # Settlement convention for avg60 computation
+  # - "A": average of [T-60s, T-1s] (exclusive of settle moment)
+  # - "B": average of (T-60s, T] (inclusive of settle moment)
+  convention: "A"  # Change to "B" after validating Kalshi's exact rule
+  
+  # Log both conventions for comparison
+  log_both: true
+  
+  # Boundary handling for partial windows
+  # - "strict": require full 60 seconds of data
+  # - "flexible": use available data if < 60 seconds
+  boundary_handling: "strict"
+
+# ==============================================================================
+# PROBABILITY MODEL
+# ==============================================================================
+probability:
+  # Monte Carlo simulation parameters
+  monte_carlo:
+    num_simulations: 10000  # Higher = more accurate but slower
+    random_seed: 42  # For reproducibility in testing
+  
+  # Volatility estimation window (seconds)
+  volatility_window: 180
+  
+  # Deterministic bounds near settlement
+  # If remaining seconds < threshold and probability is locked, skip simulation
+  deterministic_threshold:
+    seconds_remaining: 10
+    probability_lock: 0.99  # Consider locked if P > 0.99 or P < 0.01
+  
+  # Update frequency (Hz)
+  update_frequency: 1.0
+
+# ==============================================================================
+# EDGE DETECTION
+# ==============================================================================
+edge_detection:
+  # Minimum edge required to generate signal
+  min_edge_threshold: 0.03  # 3% edge after all costs
+  
+  # Cost buffers (as fraction of contract value)
+  buffers:
+    fee: 0.007          # 0.7% fee per side
+    slippage: 0.005     # 0.5% expected slippage
+    latency: 0.003      # 0.3% buffer for latency risk
+  
+  # Time window for delay capture (seconds before settlement)
+  # Only trigger delay signals within this window
+  delay_window:
+    min_seconds: 30   # Don't trade too early (noise dominates)
+    max_seconds: 600  # Don't trade more than 10 min before settle
+  
+  # Market implied probability calculation
+  market_probability:
+    # Method: "mid" (use midpoint), "executable" (use best ask), "weighted" (depth-weighted)
+    method: "executable"
+    
+    # Minimum orderbook depth (USD) to trust market price
+    min_depth_usd: 100
+  
+  # Latency monitoring
+  latency_monitoring:
+    # Auto-widen thresholds when latency exceeds this (ms)
+    warning_threshold_ms: 200
+    critical_threshold_ms: 500
+    
+    # Multiplier for edge threshold when latency is high
+    high_latency_multiplier: 1.5
+
+# ==============================================================================
+# STRATEGY
+# ==============================================================================
+strategy:
+  # Signal types to enable
+  signals:
+    delay_capture:
+      enabled: true
+      weight: 1.0
+    
+    momentum_confirmation:
+      enabled: true
+      weight: 0.5
+      min_move_threshold: 0.002  # 0.2% move from baseline
+    
+    baseline_gap_at_open:
+      enabled: true
+      weight: 0.3
+      max_seconds_after_open: 30  # Only in first 30 seconds of interval
+  
+  # NO TRADE policies
+  no_trade:
+    # Don't trade if p_true is near 50-50
+    neutral_zone:
+      enabled: true
+      min_probability: 0.45
+      max_probability: 0.55
+    
+    # Don't trade in final seconds before settlement (unless edge is huge)
+    final_window:
+      seconds: 15
+      override_edge_threshold: 0.15  # Only trade if 15%+ edge
+    
+    # Don't trade if spread is too wide
+    max_spread_pct: 0.05  # 5% spread max
+
+# ==============================================================================
+# RISK MANAGEMENT ($200 Bankroll)
+# ==============================================================================
+risk:
+  # Bankroll configuration
+  initial_bankroll_usd: 200
+  auto_fetch_balance: true  # Try to fetch from Kalshi API
+  
+  # Position sizing
+  position_sizing:
+    # Maximum risk per single trade
+    max_risk_per_trade_usd: 8  # 4% of $200 bankroll
+    max_risk_per_trade_pct: 0.04
+    
+    # Maximum total open exposure across all positions
+    max_open_exposure_usd: 24  # 12% of bankroll
+    max_open_exposure_pct: 0.12
+    
+    # Scale size with edge
+    edge_scaling:
+      enabled: true
+      target_edge: 0.05  # Use full size at 5% edge
+      min_edge_for_min_size: 0.02  # Use min size at 2% edge
+      min_size_fraction: 0.25  # Min size = 25% of max size
+  
+  # Circuit breakers
+  circuit_breakers:
+    # Daily loss limit
+    daily_loss_limit_usd: 20  # 10% of bankroll
+    daily_loss_limit_pct: 0.10
+    
+    # Consecutive loss limit (then cooldown)
+    consecutive_loss_limit: 4
+    cooldown_after_losses_seconds: 1800  # 30 minutes
+    
+    # Maximum drawdown from peak
+    max_drawdown_pct: 0.25  # 25% from peak
+    
+    # Halt trading if any breaker trips
+    auto_halt: true
+  
+  # Orderbook quality gates
+  orderbook_quality:
+    # Don't trade if best price is worse than this distance from mid
+    max_price_impact_pct: 0.02  # 2%
+    
+    # Don't trade if size at best price is below this (USD)
+    min_size_at_best_usd: 50
+
+# ==============================================================================
+# ALERTS
+# ==============================================================================
+alerts:
+  # Desktop notifications (macOS/Linux/Windows)
+  desktop:
+    enabled: true
+    sound: true
+  
+  # Telegram bot
+  telegram:
+    enabled: false
+    bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
+    chat_id: "YOUR_CHAT_ID"
+  
+  # Webhook (Discord, Slack, custom)
+  webhook:
+    enabled: false
+    url: "https://your-webhook-url.com"
+    method: "POST"
+  
+  # Email (SMTP)
+  email:
+    enabled: false
+    smtp_host: "smtp.gmail.com"
+    smtp_port: 587
+    username: "your-email@gmail.com"
+    password: "your-app-password"
+    to_address: "your-email@gmail.com"
+  
+  # Alert triggers
+  triggers:
+    new_signal: true        # Alert on every new trade signal
+    position_opened: true   # Alert when position opened (paper/live)
+    position_closed: true   # Alert when position closed
+    circuit_breaker: true   # Alert when risk limit hit
+    high_latency: true      # Alert when latency spikes
+    error: true            # Alert on errors
+
+# ==============================================================================
+# UI / DISPLAY
+# ==============================================================================
+ui:
+  # Console display refresh rate (Hz)
+  refresh_rate: 2.0
+  
+  # Display precision
+  precision:
+    probability: 4  # Show 4 decimal places for probabilities
+    edge: 4
+    price: 2
+    size: 2
+  
+  # Color scheme
+  colors:
+    enabled: true  # Disable for log files / non-terminal output
+  
+  # Compact mode (less verbose)
+  compact: false
+
+# ==============================================================================
+# BACKTESTING
+# ==============================================================================
+backtest:
+  # Historical data source
+  data_source:
+    # Path to historical BTC price data (1-second or 1-minute)
+    file_path: "data/btc_historical.csv"
+    
+    # Expected columns: timestamp, price
+    timestamp_column: "timestamp"
+    price_column: "price"
+    
+    # Timezone for timestamps
+    timezone: "UTC"
+  
+  # Simulation parameters
+  simulation:
+    # Spread assumption (as fraction of price)
+    assumed_spread_pct: 0.01  # 1% spread
+    
+    # Slippage model
+    slippage_model: "linear"  # "fixed" or "linear"
+    slippage_bps: 5  # 5 basis points
+    
+    # Fee per trade (one side)
+    fee_pct: 0.007  # 0.7%
+    
+    # Fill rate (probability of getting filled)
+    fill_rate: 0.95  # 95% fills
+  
+  # Metrics to compute
+  metrics:
+    - win_rate
+    - avg_edge_at_entry
+    - profit_per_trade
+    - total_pnl
+    - max_drawdown
+    - sharpe_ratio
+    - brier_score
+    - edge_attribution
+    - worst_streak
+  
+  # Parameter sweep configuration
+  parameter_sweep:
+    # Parameters to sweep
+    edge_threshold: [0.01, 0.02, 0.03, 0.04, 0.05]
+    delay_window_min: [15, 30, 60]
+    delay_window_max: [300, 600, 900]
+    
+    # Optimization metric
+    optimize_for: "sharpe_ratio"  # or "total_pnl", "win_rate", etc.
+
+# ==============================================================================
+# PAPER TRADING
+# ==============================================================================
+paper_trading:
+  # Enable paper trading automation
+  enabled: true
+  
+  # Initial paper balance
+  initial_balance_usd: 200
+  
+  # Use same risk management as live
+  use_live_risk_config: true
+  
+  # Log all paper trades
+  log_trades: true
+  log_file: "logs/paper_trades.json"
+  
+  # Simulate realistic fills
+  realistic_fills:
+    enabled: true
+    # Delay between signal and fill (milliseconds)
+    fill_delay_ms: 100
+    # Chance of missing the fill (adverse selection)
+    miss_rate: 0.05  # 5%
+
+# ==============================================================================
+# LIVE TRADING (DISABLED BY DEFAULT)
+# ==============================================================================
+live_trading:
+  # CRITICAL: Set to true to enable live trading
+  enabled: false
+  
+  # Additional safety confirmation required
+  confirmation_required: true
+  confirmation_phrase: "I UNDERSTAND THE RISKS"
+  
+  # Use same risk management as configured above
+  use_risk_config: true
+  
+  # Additional live trading specific limits
+  limits:
+    # Maximum orders per day
+    max_orders_per_day: 50
+    
+    # Minimum seconds between orders
+    min_seconds_between_orders: 5
+  
+  # Order execution
+  execution:
+    # Order type: "market" or "limit"
+    order_type: "limit"
+    
+    # For limit orders: how aggressive (0 = passive, 1 = marketable)
+    limit_aggressiveness: 0.8
+    
+    # Timeout for order fills (seconds)
+    order_timeout: 30
+    
+    # Post-only (avoid taking liquidity if true)
+    post_only: false
+
+# ==============================================================================
+# LOGGING
+# ==============================================================================
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  level: "INFO"
+  
+  # Log format: "json" for structured logs, "text" for human-readable
+  format: "json"
+  
+  # Log files
+  files:
+    main_log: "logs/main.log"
+    trade_log: "logs/trades.json"
+    signal_log: "logs/signals.json"
+    latency_log: "logs/latency.json"
+  
+  # Rotation
+  rotation:
+    enabled: true
+    max_size_mb: 100
+    backup_count: 10
+  
+  # Console output
+  console:
+    enabled: true
+    level: "INFO"
+
+# ==============================================================================
+# PERFORMANCE
+# ==============================================================================
+performance:
+  # Threading
+  num_worker_threads: 4
+  
+  # Use optimized NumPy/Numba for Monte Carlo
+  use_numba: true
+  
+  # Cache expensive computations
+  enable_caching: true
+  cache_ttl_seconds: 1
+
+# ==============================================================================
+# DEVELOPMENT / DEBUG
+# ==============================================================================
+development:
+  # Debug mode (more verbose logging)
+  debug: false
+  
+  # Save debug data to files
+  save_debug_data: false
+  debug_data_dir: "debug/"
+  
+  # Dry run (don't actually connect to APIs)
+  dry_run: false
+  
+  # Use simulated data
+  simulate_data: false
+
